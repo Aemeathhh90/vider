@@ -1,10 +1,12 @@
 package com.kakaanime.provider
 
+import com.kakaanime.provider.extractor.BrowserStreamResolver
+
 object ProviderFactory {
-    fun createRegistry(): ProviderRegistry {
+    fun createRegistry(browserResolver: BrowserStreamResolver? = null): ProviderRegistry {
         return ProviderRegistry().apply {
-            register(OtakudesuProvider())
-            register(SamehadakuProvider())
+            register(OtakudesuProvider(browserResolver))
+            register(SamehadakuProvider(browserResolver))
 
             register(RemoteSourceProvider("animasu", "Animasu", 30, "animasu"))
             register(RemoteSourceProvider("animeindo", "AnimeIndo", 40, "animeindo"))
@@ -36,5 +38,5 @@ object ProviderFactory {
         }
     }
 
-    fun createEngine(): ProviderEngine = ProviderEngine(createRegistry())
+    fun createEngine(browserResolver: BrowserStreamResolver? = null): ProviderEngine = ProviderEngine(createRegistry(browserResolver))
 }
