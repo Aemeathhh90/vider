@@ -15,9 +15,7 @@ import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
 
 /** Samehadaku episode-page resolver; host URLs are delegated to the normal extractor chain. */
-class SamehadakuEpisodeExtractor(
-    browserResolver: BrowserStreamResolver? = null
-) : StreamExtractor {
+class SamehadakuEpisodeExtractor(browserResolver: BrowserStreamResolver? = null) : StreamExtractor {
     override val id = "samehadaku-episode"
     override val priority = 120
     private val mainHost = "v2.samehadaku.how"
@@ -25,10 +23,7 @@ class SamehadakuEpisodeExtractor(
         .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(30, TimeUnit.SECONDS).followRedirects(true).build()
     private val hostResolver = StreamResolver(
-        ExtractorRegistry(
-            includeSamehadakuEpisodeExtractor = false,
-            browserResolver = browserResolver
-        ),
+        ExtractorRegistry(includeSamehadakuEpisodeExtractor = false, browserResolver = browserResolver),
         browserResolver = browserResolver
     )
 
@@ -39,7 +34,6 @@ class SamehadakuEpisodeExtractor(
     }
 
     override suspend fun extract(url: String, referer: String?): List<ProviderStream> {
-        println("SAMEHADAKU_CCTV_EXTRACTOR_INPUT url=$url referer=$referer")
         val page = getPage(url) ?: return emptyList()
         val discovered = linkedMapOf<String, DiscoveredLink>()
         page.select("div#downloadb li a[href]").forEach { anchor ->
@@ -78,7 +72,8 @@ class SamehadakuEpisodeExtractor(
     }
 
     private fun getPage(url: String) = runCatching {
-        Request.Builder().url(url).header("User-Agent", USER_AGENT).header("Accept", "text/html,application/xhtml+xml")
+        Request.Builder().url(url).header("User-Agent", USER_AGENT)
+            .header("Accept", "text/html,application/xhtml+xml")
             .header("Accept-Language", "id-ID,id;q=0.9,en;q=0.8").build().let { request ->
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) null else response.body?.string()?.takeIf { it.isNotBlank() }?.let { Jsoup.parse(it, url) }
@@ -88,7 +83,10 @@ class SamehadakuEpisodeExtractor(
 
     private fun resolveEmbedPage(embedUrl: String, episodeUrl: String, quality: String?): List<ProviderStream> {
         val document = runCatching {
-            val request = Request.Builder().url(embedUrl).header("User-Agent", USER_AGENT).header("Referer", episodeUrl).build()
+            val request = Request.Builder().url(embedUrl).header("User-Agent", USER_AGENT)
+                .header("Accept", "text/html,application/xhtml+xml")
+                .header("Accept-Language", "id-ID,id;q=0.9,en;q=0.8")
+                .header("Referer", embedUrl.ifBlank { episodeUrl }).build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) null else response.body?.string()?.takeIf { it.isNotBlank() }?.let { Jsoup.parse(it, embedUrl) }
             }
@@ -132,12 +130,7 @@ class SamehadakuEpisodeExtractor(
 
     private fun isDirectMedia(url: String) = url.contains(".m3u8", true) || url.contains(".mpd", true) || url.contains(".mp4", true) || url.contains(".webm", true)
     private fun directStream(url: String, referer: String, quality: String?) = ProviderStream("samehadaku", url, quality, "Japanese", "Indonesian", streamTypeFromUrl(url), mapOf("User-Agent" to USER_AGENT, "Referer" to referer))
-    private fun streamTypeFromUrl(url: String) = when {
-        url.contains(".m3u8", true) -> StreamType.HLS
-        url.contains(".mpd", true) -> StreamType.DASH
-        url.contains(".mp4", true) || url.contains(".webm", true) -> StreamType.MP4
-        else -> StreamType.UNKNOWN
-    }
+    private fun streamTypeFromUrl(url: String) = when { url.contains(".m3u8", true) -> StreamType.HLS; url.contains(".mpd", true) -> StreamType.DASH; url.contains(".mp4", true) || url.contains(".webm", true) -> StreamType.MP4; else -> StreamType.UNKNOWN }
     private data class DiscoveredLink(val url: String, val quality: String?)
     private companion object { const val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36" }
 }
