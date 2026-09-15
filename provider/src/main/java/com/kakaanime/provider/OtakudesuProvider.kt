@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
@@ -29,7 +30,9 @@ class OtakudesuProvider(
         val normalized = query.trim(); if (normalized.isBlank()) return emptyList()
         val primary = requestJson("$baseUrl/search?q=${encode(normalized)}&page=1")?.optJSONObject("data")?.optJSONArray("results")?.toProviderAnimeList().orEmpty()
         if (primary.isNotEmpty()) return primary
-        return requestJson("$legacyUrl/search/${encode(normalized)}")?.optJSONArray("search_results")?.toLegacyProviderAnimeList().orEmpty()
+        val legacy = requestJson("$legacyUrl/search/${encode(normalized)}")?.optJSONArray("search_results")?.toLegacyProviderAnimeList().orEmpty()
+        if (legacy.isNotEmpty()) return legacy
+        return webSearch(normalized)
     }
 
     override suspend fun getAnime(animeId: String): ProviderAnime? {
@@ -78,6 +81,36 @@ class OtakudesuProvider(
         return emptyList()
     }
 
+    private suspend fun webSearch(query: String): List<ProviderAnime> = withContext(Dispatchers.IO) {
+        runCatching {
+            val results = linkedMapOf<String, ProviderAnime>()
+            val encoded = encode(query)
+            val sources = listOf("https://otakudesu.blog", "https://otakudesu.ro", "https://otakudesu.cloud", "https://otakudesu.fit")
+            for (base in sources) {
+                val url = "$base/?s=$encoded&post_type=anime"
+                val request = Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
+                    .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8")
+                    .build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val html = response.body?.string().orEmpty()
+                    val pattern = Regex("<a[^>]+href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    for (match in pattern.findAll(html)) {
+                        val href = decodeHtml(match.groupValues[1].trim())
+                        val title = match.groupValues[2].replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+                        if (title.isBlank() || !href.contains("/anime/", true) && !href.contains("/series/", true)) continue
+                        val slug = normalizeAnimeSlug(URI(base).resolve(href).toString())
+                        if (slug.isBlank()) continue
+                        results.putIfAbsent(slug.lowercase(), ProviderAnime("$id:$slug", title, id))
+                    }
+                }
+                if (results.isNotEmpty()) break
+            }
+            results.values.toList()
+        }.getOrDefault(emptyList())
+    }
+
     private suspend fun requestJson(url: String): JSONObject? = withContext(Dispatchers.IO) { runCatching { Request.Builder().url(url).header("User-Agent", "KakaAnime/0.1").header("Accept", "application/json").build().let { request -> client.newCall(request).execute().use { response -> if (!response.isSuccessful) null else response.body?.string()?.takeIf { it.isNotBlank() }?.let(::JSONObject) } } }.getOrNull() }
     private fun JSONArray.toProviderAnimeList() = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val slug = normalizeAnimeSlug(item.optString("slug")); if (slug.isNotBlank()) add(ProviderAnime("$id:$slug", item.optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = item.optString("thumbnail").ifBlank { null }, status = item.optString("status").ifBlank { "UNKNOWN" }, rating = item.optString("score").toDoubleOrNull())) } }
     private fun JSONArray.toLegacyProviderAnimeList() = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val slug = normalizeAnimeSlug(item.optString("endpoint")); if (slug.isNotBlank()) add(ProviderAnime("$id:$slug", item.optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = item.optString("thumb").ifBlank { null }, status = item.optString("status").ifBlank { "UNKNOWN" }, rating = item.optString("rating").toDoubleOrNull())) } }
@@ -91,4 +124,5 @@ class OtakudesuProvider(
     private fun extractEpisodeNumber(title: String, slug: String): Int? = Regex("(?:episode|eps|ep)[^0-9]*(\\d+)", RegexOption.IGNORE_CASE).find("$title $slug")?.groupValues?.getOrNull(1)?.toIntOrNull()
     private fun encode(value: String) = URLEncoder.encode(value.trim(), "UTF-8")
     private fun encodePath(value: String) = value.trim('/').split('/').joinToString("/") { encode(it) }
+    private fun decodeHtml(value: String): String = value.replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'").replace("&lt;", "<").replace("&gt;", ">")
 }
