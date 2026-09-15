@@ -38,11 +38,14 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
         return requestJson("$legacyUrl/anime/${encodePath(slug)}")?.toLegacyProviderAnime(slug)
     }
     override suspend fun getEpisodes(animeId: String): List<ProviderEpisode> {
-        val slug = normalizeAnimeSlug(animeId); val web = webSource.getAnime(slug)
-        if (web != null) { val episodes = webSource.getEpisodes(web); if (episodes.isNotEmpty()) return episodes.map { episode -> ProviderEpisode(id = "$id:${episode.url}", animeId = "$id:$slug", number = episode.number, providerId = id, title = episode.title) } }
-        val primary = requestJson("$baseUrl/anime/${encodePath(slug)}")?.optJSONObject("data")?.optJSONArray("episodeList")?.toProviderEpisodeList(slug).orEmpty()
-        if (primary.isNotEmpty()) return primary
-        return requestJson("$legacyUrl/anime/${encodePath(slug)}")?.let { it.optJSONObject("anime_detail") ?: it }?.optJSONArray("episode_list")?.toLegacyProviderEpisodeList(slug).orEmpty()
+        val slug = normalizeAnimeSlug(animeId)
+        val merged = linkedMapOf<Int, ProviderEpisode>()
+        webSource.getEpisodes(slug).forEach { episode ->
+            merged.putIfAbsent(episode.number, ProviderEpisode("$id:${episode.url}", "$id:$slug", episode.number, id, episode.title))
+        }
+        requestJson("$baseUrl/anime/${encodePath(slug)}")?.optJSONObject("data")?.optJSONArray("episodeList")?.toProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
+        requestJson("$legacyUrl/anime/${encodePath(slug)}")?.let { it.optJSONObject("anime_detail") ?: it }?.optJSONArray("episode_list")?.toLegacyProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
+        return merged.values.sortedBy { it.number }
     }
     override suspend fun getStreams(animeId: String, episodeNumber: Int): List<ProviderStream> {
         val episode = getEpisodes(animeId).firstOrNull { it.number == episodeNumber } ?: return emptyList(); val episodeRef = episode.id.removePrefix("$id:")
