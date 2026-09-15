@@ -1,5 +1,6 @@
 package com.kakaanime.provider
 
+import com.kakaanime.provider.extractor.BrowserStreamResolver
 import com.kakaanime.provider.extractor.ExtractorRegistry
 import com.kakaanime.provider.extractor.StreamResolver
 import kotlinx.coroutines.Dispatchers
@@ -15,7 +16,9 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
 /** Samehadaku HTML-first adapter with JSON gateway fallbacks. */
-class SamehadakuProvider : AnimeProvider {
+class SamehadakuProvider(
+    browserResolver: BrowserStreamResolver? = null
+) : AnimeProvider {
     override val id = "samehadaku"
     override val name = "Samehadaku"
     override val priority = 20
@@ -24,7 +27,7 @@ class SamehadakuProvider : AnimeProvider {
     private val mainUrl = "https://v2.samehadaku.how"
     private val primary = "https://www.keyrafara.com/streaming/samehadaku"
     private val wajik = "https://wajik-anime-api.vercel.app/samehadaku"
-    private val resolver = StreamResolver(ExtractorRegistry())
+    private val resolver = StreamResolver(ExtractorRegistry(browserResolver = browserResolver), browserResolver = browserResolver)
 
     override suspend fun search(query: String): List<ProviderAnime> {
         val normalized = query.trim(); if (normalized.isBlank()) return emptyList()
