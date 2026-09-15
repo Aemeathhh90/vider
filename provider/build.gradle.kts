@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+group = "com.kakaanime"
+version = "0.1.0"
+
 android {
     namespace = "com.kakaanime.provider"
     compileSdk = 35
