@@ -2,15 +2,16 @@
 
 ## Status
 
-GREEN — Provider registry/orchestration baseline migrated.
+🟢 Provider core orchestration baseline migrated.
 
-## Migrated
+## Migrated in this stage
 
 - `ProviderRegistry`
-- `ProviderHealth`
-- `SmartProviderRouter`
+- `NormalizedEpisodeStream`
 - `ProviderEngine`
-- `ProviderFactory`
+- `SmartProviderRouter`
+
+The engine is independent of Android `Log`; diagnostics use stdout.
 
 ## Compatibility rule
 
@@ -18,7 +19,7 @@ This stage intentionally preserves the baseline sequential routing behavior from
 
 ## Current limitation
 
-No concrete provider adapters are registered yet in the separated repository. The factory accepts providers explicitly so the core remains independent from Android UI and app-specific dependencies.
+Concrete provider adapters are not yet fully migrated/registered. Extractor implementations and playback integration still need to be connected.
 
 ## Next stage
 
