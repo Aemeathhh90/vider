@@ -36,13 +36,10 @@ internal class OtakudesuWebSource {
 
     suspend fun getEpisodes(slug: String): List<WebEpisode> {
         val merged = linkedMapOf<Int, WebEpisode>()
-        for (source in sources) {
-            for (url in source.detailUrls(slug)) {
-                val html = get(url) ?: continue
-                val title = html.firstMatch("<h1[^>]*>(.*?)</h1>", "<title[^>]*>(.*?)</title>")
-                if (title.isNullOrBlank()) continue
-                for (episode in parseEpisodes(url, html)) merged.putIfAbsent(episode.number, episode)
-            }
+        for (source in sources) for (url in source.detailUrls(slug)) {
+            val html = get(url) ?: continue
+            if (html.isBlank()) continue
+            for (episode in parseEpisodes(url, html)) merged.putIfAbsent(episode.number, episode)
         }
         return merged.values.sortedBy { it.number }
     }
@@ -65,17 +62,25 @@ internal class OtakudesuWebSource {
     }
 
     private fun parseEpisodes(pageUrl: String, html: String): List<WebEpisode> {
-        val result = mutableListOf<WebEpisode>()
-        val pattern = Regex("<a[^>]+href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        for (match in pattern.findAll(html)) {
-            val href = match.groupValues[1].trim()
-            val text = match.groupValues[2].stripHtml().trim()
-            val number = extractEpisodeNumber(text, href) ?: continue
-            val url = resolve(pageUrl, decodeHtml(href)) ?: continue
-            if (!url.contains("episode", true)) continue
-            result += WebEpisode(url, number, text.ifBlank { "Episode $number" })
-        }
-        return result.distinctBy { it.number }.sortedBy { it.number }
+        val result = linkedMapOf<Int, WebEpisode>()
+        val anchorPattern = Regex("<a\\b[^>]*\\bhref\\s*=\\s*[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a\\s*>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        for (match in anchorPattern.findAll(html)) addEpisode(result, pageUrl, match.groupValues[1], match.groupValues[2])
+
+        // Some Otakudesu mirrors/theme revisions put the episode URL in attributes
+        // around a non-standard anchor. Keep a second permissive pass for those pages.
+        val hrefPattern = Regex("(?:href|data-href|data-url)\\s*=\\s*[\\\"']([^\\\"']*(?:episode|eps|ep)[^\\\"']*)[\\\"']", RegexOption.IGNORE_CASE)
+        for (match in hrefPattern.findAll(html)) addEpisode(result, pageUrl, match.groupValues[1], "")
+
+        return result.values.sortedBy { it.number }
+    }
+
+    private fun addEpisode(result: MutableMap<Int, WebEpisode>, pageUrl: String, rawHref: String, rawText: String) {
+        val href = decodeHtml(rawHref.trim())
+        val text = rawText.stripHtml().trim()
+        val url = resolve(pageUrl, href) ?: return
+        if (!url.contains("episode", true)) return
+        val number = extractEpisodeNumber(text, url) ?: return
+        result.putIfAbsent(number, WebEpisode(url, number, text.ifBlank { "Episode $number" }))
     }
 
     private suspend fun get(url: String): String? = withContext(Dispatchers.IO) {
