@@ -3,7 +3,6 @@ package com.kakaanime.provider
 object ProviderFactory {
     fun createRegistry(): ProviderRegistry {
         return ProviderRegistry().apply {
-            register(DemoProvider())
             register(OtakudesuProvider())
             register(SamehadakuProvider())
 
