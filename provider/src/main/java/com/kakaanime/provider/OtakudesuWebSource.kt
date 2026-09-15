@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jsoup.Jsoup
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
@@ -63,30 +64,63 @@ internal class OtakudesuWebSource {
 
     private fun parseEpisodes(pageUrl: String, html: String): List<WebEpisode> {
         val result = linkedMapOf<Int, WebEpisode>()
-        val anchorPattern = Regex("<a\\b[^>]*\\bhref\\s*=\\s*[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a\\s*>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        for (match in anchorPattern.findAll(html)) addEpisode(result, pageUrl, match.groupValues[1], match.groupValues[2])
 
-        // Some Otakudesu mirrors/theme revisions put the episode URL in attributes
-        // around a non-standard anchor. Keep a second permissive pass for those pages.
-        val hrefPattern = Regex("(?:href|data-href|data-url)\\s*=\\s*[\\\"']([^\\\"']*(?:episode|eps|ep)[^\\\"']*)[\\\"']", RegexOption.IGNORE_CASE)
-        for (match in hrefPattern.findAll(html)) addEpisode(result, pageUrl, match.groupValues[1], "")
+        // Parse the real HTML DOM instead of depending on one exact anchor layout.
+        // Otakudesu has changed its theme/attribute ordering, while the episode
+        // anchors themselves remain normal <a href="..."> elements.
+        runCatching {
+            Jsoup.parse(html, pageUrl).select("a[href]").forEach { anchor ->
+                addEpisode(result, pageUrl, anchor.attr("href"), anchor.text())
+            }
+        }
+
+        // Keep a regex fallback for malformed/non-standard mirror HTML.
+        val anchorPattern = Regex(
+            "<a\\b[^>]*\\bhref\\s*=\\s*[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a\\s*>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        for (match in anchorPattern.findAll(html)) {
+            addEpisode(result, pageUrl, match.groupValues[1], match.groupValues[2])
+        }
+
+        // Some mirrors put the URL in data attributes around non-standard anchors.
+        val hrefPattern = Regex(
+            "(?:href|data-href|data-url)\\s*=\\s*[\\\"']([^\\\"']*(?:episode|eps|ep)[^\\\"']*)[\\\"']",
+            RegexOption.IGNORE_CASE
+        )
+        for (match in hrefPattern.findAll(html)) {
+            addEpisode(result, pageUrl, match.groupValues[1], "")
+        }
 
         return result.values.sortedBy { it.number }
     }
 
-    private fun addEpisode(result: MutableMap<Int, WebEpisode>, pageUrl: String, rawHref: String, rawText: String) {
+    private fun addEpisode(
+        result: MutableMap<Int, WebEpisode>,
+        pageUrl: String,
+        rawHref: String,
+        rawText: String
+    ) {
         val href = decodeHtml(rawHref.trim())
+        if (href.isBlank()) return
         val text = rawText.stripHtml().trim()
         val url = resolve(pageUrl, href) ?: return
-        if (!url.contains("episode", true)) return
         val number = extractEpisodeNumber(text, url) ?: return
-        result.putIfAbsent(number, WebEpisode(url, number, text.ifBlank { "Episode $number" }))
+
+        // Do not require the URL itself to contain the literal word "episode".
+        // The episode number in the anchor title/text is authoritative enough for
+        // discovery and also handles future Otakudesu slug/theme variations.
+        result.putIfAbsent(
+            number,
+            WebEpisode(url, number, text.ifBlank { "Episode $number" })
+        )
     }
 
     private suspend fun get(url: String): String? = withContext(Dispatchers.IO) {
         runCatching {
             val request = Request.Builder().url(url)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8")
                 .build()
             client.newCall(request).execute().use { response ->
@@ -102,20 +136,43 @@ internal class OtakudesuWebSource {
             .replace(Regex("^1piece$", RegexOption.IGNORE_CASE), "one-piece")
             .replace(Regex("^onepiece$", RegexOption.IGNORE_CASE), "one-piece")
         return if (seriesStyle) listOf("$baseUrl/series/${fitSlug.trim('/')}/")
-        else listOf("$baseUrl/anime/${clean.trim('/')}/", "$baseUrl/anime/${clean.trim('/').removeSuffix("-sub-indo")}/").distinct()
+        else listOf(
+            "$baseUrl/anime/${clean.trim('/')}/",
+            "$baseUrl/anime/${clean.trim('/').removeSuffix("-sub-indo")}/"
+        ).distinct()
     }
 
     private fun String.firstMatch(vararg patterns: String): String? = patterns.firstNotNullOfOrNull {
         Regex(it, setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).find(this)?.groupValues?.getOrNull(1)?.takeIf(String::isNotBlank)
     }
-    private fun String.stripHtml(): String = replace(Regex("<[^>]+>"), " ").replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'").replace("&nbsp;", " ").replace(Regex("\\s+"), " ").trim()
-    private fun decodeHtml(value: String): String = value.replace("&amp;", "&").replace("&quot;", "\"").replace("&#039;", "'").replace("&lt;", "<").replace("&gt;", ">")
-    private fun resolve(base: String, candidate: String): String? = runCatching { URI(base).resolve(candidate).toString() }.getOrNull()
+
+    private fun String.stripHtml(): String = replace(Regex("<[^>]+>"), " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&nbsp;", " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    private fun decodeHtml(value: String): String = value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+
+    private fun resolve(base: String, candidate: String): String? = runCatching {
+        URI(base).resolve(candidate).toString()
+    }.getOrNull()
+
     private fun extractEpisodeNumber(title: String, href: String): Int? {
         val value = "$title $href"
-        return Regex("(?:episode|eps|ep)[^0-9]*(\\d+)", RegexOption.IGNORE_CASE).find(value)?.groupValues?.getOrNull(1)?.toIntOrNull()
-            ?: Regex("(?:-|/)(\\d+)(?:-|/|$)").find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return Regex("(?:episode|eps|ep)[^0-9]*(\\d+)", RegexOption.IGNORE_CASE)
+            .find(value)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?:-|/)(\\d+)(?:-|/|$)")
+                .find(href)?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
+
     private data class WebSource(val id: String, val baseUrl: String, val seriesStyle: Boolean)
     internal data class WebAnime(val url: String, val title: String, val html: String, val sourceId: String)
     internal data class WebEpisode(val url: String, val number: Int, val title: String)
