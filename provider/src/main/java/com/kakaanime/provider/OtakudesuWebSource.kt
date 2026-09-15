@@ -33,6 +33,19 @@ internal class OtakudesuWebSource {
 
     suspend fun getEpisodes(anime: WebAnime): List<WebEpisode> = parseEpisodes(anime.url, anime.html)
 
+    suspend fun getEpisodes(slug: String): List<WebEpisode> {
+        val merged = linkedMapOf<Int, WebEpisode>()
+        for (source in sources) {
+            for (url in source.detailUrls(slug)) {
+                val html = get(url) ?: continue
+                val title = html.firstMatch("<h1[^>]*>(.*?)</h1>", "<title[^>]*>(.*?)</title>")
+                if (title.isNullOrBlank()) continue
+                for (episode in parseEpisodes(url, html)) merged.putIfAbsent(episode.number, episode)
+            }
+        }
+        return merged.values.sortedBy { it.number }
+    }
+
     suspend fun getEpisodePage(episode: WebEpisode): String? = get(episode.url)
 
     fun discoverPlaybackUrls(html: String, pageUrl: String): List<String> {
