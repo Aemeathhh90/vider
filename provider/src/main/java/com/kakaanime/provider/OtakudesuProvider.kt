@@ -13,9 +13,7 @@ import java.net.URI
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
-class OtakudesuProvider(
-    browserResolver: BrowserStreamResolver? = null
-) : AnimeProvider {
+class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeProvider {
     override val id = "otakudesu"
     override val name = "Otakudesu"
     override val priority = 10
@@ -89,10 +87,7 @@ class OtakudesuProvider(
             val sources = listOf("https://otakudesu.blog", "https://otakudesu.ro", "https://otakudesu.cloud", "https://otakudesu.fit")
             for (base in sources) {
                 val url = "$base/?s=$encoded&post_type=anime"
-                val request = Request.Builder().url(url)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36")
-                    .header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8")
-                    .build()
+                val request = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36").header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8").build()
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
                     val html = response.body?.string().orEmpty()
