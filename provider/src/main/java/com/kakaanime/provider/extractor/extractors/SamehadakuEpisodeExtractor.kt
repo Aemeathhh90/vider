@@ -2,6 +2,7 @@ package com.kakaanime.provider.extractor.extractors
 
 import com.kakaanime.provider.ProviderStream
 import com.kakaanime.provider.StreamType
+import com.kakaanime.provider.extractor.BrowserStreamResolver
 import com.kakaanime.provider.extractor.ExtractorRegistry
 import com.kakaanime.provider.extractor.StreamExtractor
 import com.kakaanime.provider.extractor.StreamResolver
@@ -14,14 +15,22 @@ import java.net.URLDecoder
 import java.util.concurrent.TimeUnit
 
 /** Samehadaku episode-page resolver; host URLs are delegated to the normal extractor chain. */
-class SamehadakuEpisodeExtractor : StreamExtractor {
+class SamehadakuEpisodeExtractor(
+    browserResolver: BrowserStreamResolver? = null
+) : StreamExtractor {
     override val id = "samehadaku-episode"
     override val priority = 120
     private val mainHost = "v2.samehadaku.how"
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(30, TimeUnit.SECONDS).followRedirects(true).build()
-    private val hostResolver = StreamResolver(ExtractorRegistry(includeSamehadakuEpisodeExtractor = false))
+    private val hostResolver = StreamResolver(
+        ExtractorRegistry(
+            includeSamehadakuEpisodeExtractor = false,
+            browserResolver = browserResolver
+        ),
+        browserResolver = browserResolver
+    )
 
     override fun canHandle(url: String): Boolean {
         val host = runCatching { URI(url).host.orEmpty().lowercase() }.getOrDefault("")
