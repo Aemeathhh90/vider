@@ -31,20 +31,21 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
         return webSearch(normalized)
     }
     override suspend fun getAnime(animeId: String): ProviderAnime? {
-        val slug = normalizeAnimeSlug(animeId); val web = webSource.getAnime(slug)
+        val slug = normalizeAnimeSlug(animeId); val apiSlug = apiAnimeSlug(slug); val web = webSource.getAnime(slug)
         if (web != null) return ProviderAnime(id = "$id:$slug", title = web.title, providerId = id)
-        val primary = requestJson("$baseUrl/anime/${encodePath(slug)}")?.optJSONObject("data")
+        val primary = requestJson("$baseUrl/anime/${encodePath(apiSlug)}")?.optJSONObject("data")
         if (primary != null) return primary.toProviderAnime(slug)
-        return requestJson("$legacyUrl/anime/${encodePath(slug)}")?.toLegacyProviderAnime(slug)
+        return requestJson("$legacyUrl/anime/${encodePath(apiSlug)}")?.toLegacyProviderAnime(slug)
     }
     override suspend fun getEpisodes(animeId: String): List<ProviderEpisode> {
         val slug = normalizeAnimeSlug(animeId)
+        val apiSlug = apiAnimeSlug(slug)
         val merged = linkedMapOf<Int, ProviderEpisode>()
         webSource.getEpisodes(slug).forEach { episode ->
             merged.putIfAbsent(episode.number, ProviderEpisode("$id:${episode.url}", "$id:$slug", episode.number, id, episode.title))
         }
-        requestJson("$baseUrl/anime/${encodePath(slug)}")?.optJSONObject("data")?.optJSONArray("episodeList")?.toProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
-        requestJson("$legacyUrl/anime/${encodePath(slug)}")?.let { it.optJSONObject("anime_detail") ?: it }?.optJSONArray("episode_list")?.toLegacyProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
+        requestJson("$baseUrl/anime/${encodePath(apiSlug)}")?.optJSONObject("data")?.optJSONArray("episodeList")?.toProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
+        requestJson("$legacyUrl/anime/${encodePath(apiSlug)}")?.let { it.optJSONObject("anime_detail") ?: it }?.optJSONArray("episode_list")?.toLegacyProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
         return merged.values.sortedBy { it.number }
     }
     override suspend fun getStreams(animeId: String, episodeNumber: Int): List<ProviderStream> {
@@ -66,6 +67,7 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
     private fun JSONArray.toLegacyProviderEpisodeList(slug: String) = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val endpoint = item.optString("endpoint").trim('/'); val number = extractEpisodeNumber(item.optString("title"), endpoint) ?: continue; add(ProviderEpisode("$id:$endpoint", "$id:$slug", number, id, item.optString("title").ifBlank { "Episode $number" }, item.optString("thumbnail").ifBlank { null })) } }.sortedBy { it.number }
     private fun JSONObject.streamCandidates() = buildList { val streams = optJSONArray("streams") ?: JSONArray(); for (i in 0 until streams.length()) streams.optJSONObject(i)?.optString("embedUrl")?.trim()?.takeIf { it.isNotBlank() }?.let(::add); optString("defaultStreamUrl").trim().takeIf { it.isNotBlank() }?.let(::add) }.distinct()
     private fun normalizeAnimeSlug(value: String): String { val raw = value.removePrefix("$id:").trim().trim('/'); val slug = raw.substringAfterLast("/anime/", raw).substringAfterLast("/series/", raw).substringBefore("?").trim('/'); return when { slug.equals("1piece-sub-indo", true) -> "1piece-sub-indo"; slug.equals("onepiece-sub-indo", true) -> "1piece-sub-indo"; else -> slug } }
+    private fun apiAnimeSlug(slug: String): String = when { slug.equals("1piece-sub-indo", true) -> "one-piece-sub-indo"; else -> slug }
     private fun normalizeEpisodeSlug(value: String): String = value.removePrefix("$id:").substringAfter("/episode/", value.removePrefix("$id:")).substringBefore("?").trim('/')
     private fun extractEpisodeNumber(title: String, slug: String): Int? = Regex("(?:episode|eps|ep)[^0-9]*(\\d+)", RegexOption.IGNORE_CASE).find("$title $slug")?.groupValues?.getOrNull(1)?.toIntOrNull()
     private fun encode(value: String) = URLEncoder.encode(value.trim(), "UTF-8")
