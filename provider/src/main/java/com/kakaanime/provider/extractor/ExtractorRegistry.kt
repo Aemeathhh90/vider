@@ -1,13 +1,25 @@
 package com.kakaanime.provider.extractor
 
 import com.kakaanime.provider.extractor.extractors.GenericDirectExtractor
+import com.kakaanime.provider.extractor.extractors.GenericEmbedExtractor
+import com.kakaanime.provider.extractor.extractors.KrakenFilesExtractor
 import com.kakaanime.provider.extractor.extractors.OtakudesuHostExtractor
+import com.kakaanime.provider.extractor.extractors.OtakudesuServerExtractor
+import com.kakaanime.provider.extractor.extractors.PixelDrainExtractor
 
 class ExtractorRegistry(
-    extractors: List<StreamExtractor> = emptyList()
+    customExtractors: List<StreamExtractor> = emptyList()
 ) {
     private val extractors: List<StreamExtractor> =
-        (extractors + OtakudesuHostExtractor() + GenericDirectExtractor())
+        (customExtractors +
+            listOf(
+                OtakudesuHostExtractor(),
+                OtakudesuServerExtractor(),
+                KrakenFilesExtractor(),
+                PixelDrainExtractor(),
+                GenericEmbedExtractor(),
+                GenericDirectExtractor()
+            ))
             .distinctBy { it.id }
             .sortedByDescending { it.priority }
 
