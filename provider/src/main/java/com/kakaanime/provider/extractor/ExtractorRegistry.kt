@@ -11,10 +11,11 @@ import com.kakaanime.provider.extractor.extractors.SamehadakuEpisodeExtractor
 
 class ExtractorRegistry(
     customExtractors: List<StreamExtractor> = emptyList(),
-    includeSamehadakuEpisodeExtractor: Boolean = true
+    includeSamehadakuEpisodeExtractor: Boolean = true,
+    private val browserResolver: BrowserStreamResolver? = null
 ) {
     private val extractors: List<StreamExtractor> = buildList {
-        if (includeSamehadakuEpisodeExtractor) add(SamehadakuEpisodeExtractor())
+        if (includeSamehadakuEpisodeExtractor) add(SamehadakuEpisodeExtractor(browserResolver))
         add(OtakudesuHostExtractor())
         addAll(
             listOf(
