@@ -22,6 +22,11 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
     private val streamResolver = StreamResolver(ExtractorRegistry(browserResolver = browserResolver), browserResolver = browserResolver)
     private val baseUrl = "https://qrtzanim.vercel.app/api"
     private val legacyUrl = "https://otakudesu-api-jade.vercel.app/api"
+    // Community-maintained Otakudesu API. We use it as a structured episode/source
+    // resolver before falling back to brittle HTML parsing. Its documented model
+    // is Anime -> episode_lists -> episode -> stream_url/mirrors.
+    private val communityUrl = "https://api.otakudesu.natee.my.id/api/v1/anime"
+
     override suspend fun search(query: String): List<ProviderAnime> {
         val normalized = query.trim(); if (normalized.isBlank()) return emptyList()
         val primary = requestJson("$baseUrl/search?q=${encode(normalized)}&page=1")?.optJSONObject("data")?.optJSONArray("results")?.toProviderAnimeList().orEmpty()
@@ -30,24 +35,38 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
         if (legacy.isNotEmpty()) return legacy
         return webSearch(normalized)
     }
+
     override suspend fun getAnime(animeId: String): ProviderAnime? {
-        val slug = normalizeAnimeSlug(animeId); val apiSlug = apiAnimeSlug(slug); val web = webSource.getAnime(slug)
+        val slug = normalizeAnimeSlug(animeId); val apiSlug = apiAnimeSlug(slug)
+        val web = webSource.getAnime(slug)
         if (web != null) return ProviderAnime(id = "$id:$slug", title = web.title, providerId = id)
+
+        val community = requestJson("$communityUrl/detail/${encodePath(apiSlug)}")?.optJSONObject("data")
+        if (community != null) return community.toCommunityAnime(slug)
+
         val primary = requestJson("$baseUrl/anime/${encodePath(apiSlug)}")?.optJSONObject("data")
         if (primary != null) return primary.toProviderAnime(slug)
         return requestJson("$legacyUrl/anime/${encodePath(apiSlug)}")?.toLegacyProviderAnime(slug)
     }
+
     override suspend fun getEpisodes(animeId: String): List<ProviderEpisode> {
         val slug = normalizeAnimeSlug(animeId)
         val apiSlug = apiAnimeSlug(slug)
         val merged = linkedMapOf<Int, ProviderEpisode>()
 
-        // Reuse the exact detail page fetched by getAnime first. This avoids a
-        // second request to Otakudesu, which can return a different challenge,
-        // redirect, or transient page on anti-bot protected mirrors.
-        webSource.getAnime(slug)?.let { web ->
-            webSource.getEpisodes(web).forEach { episode ->
-                merged.putIfAbsent(episode.number, ProviderEpisode("$id:${episode.url}", "$id:$slug", episode.number, id, episode.title))
+        // Prefer the structured community resolver. This follows the same
+        // separation used by the reference apps: episode metadata first, then
+        // a dedicated source/stream resolver. It avoids depending on the current
+        // Otakudesu HTML episode-list markup when a structured response exists.
+        requestJson("$communityUrl/detail/${encodePath(apiSlug)}")?.optJSONObject("data")?.optJSONArray("episode_lists")
+            ?.toCommunityProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
+
+        // Reuse the exact detail page fetched by getAnime as the first HTML fallback.
+        if (merged.isEmpty()) {
+            webSource.getAnime(slug)?.let { web ->
+                webSource.getEpisodes(web).forEach { episode ->
+                    merged.putIfAbsent(episode.number, ProviderEpisode("$id:${episode.url}", "$id:$slug", episode.number, id, episode.title))
+                }
             }
         }
 
@@ -63,21 +82,77 @@ class OtakudesuProvider(browserResolver: BrowserStreamResolver? = null) : AnimeP
         requestJson("$legacyUrl/anime/${encodePath(apiSlug)}")?.let { it.optJSONObject("anime_detail") ?: it }?.optJSONArray("episode_list")?.toLegacyProviderEpisodeList(slug).orEmpty().forEach { merged.putIfAbsent(it.number, it) }
         return merged.values.sortedBy { it.number }
     }
+
     override suspend fun getStreams(animeId: String, episodeNumber: Int): List<ProviderStream> {
-        val episode = getEpisodes(animeId).firstOrNull { it.number == episodeNumber } ?: return emptyList(); val episodeRef = episode.id.removePrefix("$id:")
-        if (episodeRef.startsWith("http", true)) { val page = webSource.getEpisodePage(OtakudesuWebSource.WebEpisode(episodeRef, episodeNumber, episode.title ?: "Episode $episodeNumber")); val discovered = page?.let { webSource.discoverPlaybackUrls(it, episodeRef) }.orEmpty(); val candidates = (listOf(episodeRef) + discovered).distinct(); val resolved = streamResolver.resolve(candidates, referer = episodeRef); if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) } }
-        val episodeSlug = normalizeEpisodeSlug(episodeRef); val primary = requestJson("$baseUrl/episode/${encodePath(episodeSlug)}")
-        if (primary != null) { val candidates = primary.optJSONObject("data")?.streamCandidates().orEmpty(); val resolved = streamResolver.resolve(candidates, referer = episodeRef); if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) } }
-        val legacy = requestJson("$legacyUrl/episode/${encodePath(episodeSlug)}"); val streamUrl = legacy?.let { it.optJSONObject("episode_detail") ?: it }?.optString("stream_link")?.trim().orEmpty()
-        if (streamUrl.isNotBlank()) { val resolved = streamResolver.resolve(listOf(streamUrl), referer = episodeRef); if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) } }
+        val episode = getEpisodes(animeId).firstOrNull { it.number == episodeNumber } ?: return emptyList()
+        val episodeRef = episode.id.removePrefix("$id:")
+
+        // Structured community source path: resolve the episode independently of
+        // the anime page, then expose its stream URL and mirror URLs to the normal
+        // KakaAnime StreamResolver/player pipeline.
+        if (episodeRef.startsWith("community:")) {
+            val episodeSlug = episodeRef.removePrefix("community:").trim('/')
+            val data = requestJson("$communityUrl/episode/${encodePath(episodeSlug)}")?.optJSONObject("data")
+            if (data != null) {
+                val candidates = buildList {
+                    data.optString("stream_url").trim().takeIf { it.isNotBlank() }?.let(::add)
+                    val mirrors = data.optJSONArray("mirrors") ?: JSONArray()
+                    for (i in 0 until mirrors.length()) {
+                        mirrors.optJSONObject(i)?.optString("content")?.trim()?.takeIf { it.isNotBlank() }?.let { token ->
+                            requestJson("https://api.otakudesu.natee.my.id/api/v1/anime/mirror?content=${encode(token)}")
+                                ?.optJSONObject("data")?.optString("url")?.trim()
+                                ?.takeIf { it.isNotBlank() }?.let(::add)
+                        }
+                    }
+                }.distinct()
+                val resolved = streamResolver.resolve(candidates, referer = "https://otakudesu.blog/")
+                if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) }
+            }
+        }
+
+        if (episodeRef.startsWith("http", true)) {
+            val page = webSource.getEpisodePage(OtakudesuWebSource.WebEpisode(episodeRef, episodeNumber, episode.title ?: "Episode $episodeNumber"))
+            val discovered = page?.let { webSource.discoverPlaybackUrls(it, episodeRef) }.orEmpty()
+            val candidates = (listOf(episodeRef) + discovered).distinct()
+            val resolved = streamResolver.resolve(candidates, referer = episodeRef)
+            if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) }
+        }
+
+        val episodeSlug = normalizeEpisodeSlug(episodeRef)
+        val primary = requestJson("$baseUrl/episode/${encodePath(episodeSlug)}")
+        if (primary != null) {
+            val candidates = primary.optJSONObject("data")?.streamCandidates().orEmpty()
+            val resolved = streamResolver.resolve(candidates, referer = episodeRef)
+            if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) }
+        }
+        val legacy = requestJson("$legacyUrl/episode/${encodePath(episodeSlug)}")
+        val streamUrl = legacy?.let { it.optJSONObject("episode_detail") ?: it }?.optString("stream_link")?.trim().orEmpty()
+        if (streamUrl.isNotBlank()) {
+            val resolved = streamResolver.resolve(listOf(streamUrl), referer = episodeRef)
+            if (resolved.isNotEmpty()) return resolved.map { it.copy(providerId = id) }
+        }
         return emptyList()
     }
+
     private suspend fun webSearch(query: String): List<ProviderAnime> = withContext(Dispatchers.IO) { runCatching { val results = linkedMapOf<String, ProviderAnime>(); val encoded = encode(query); val sources = listOf("https://otakudesu.blog", "https://otakudesu.ro", "https://otakudesu.cloud", "https://otakudesu.fit"); for (base in sources) { val url = "$base/?s=$encoded&post_type=anime"; val request = Request.Builder().url(url).header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/124.0.0.0 Mobile Safari/537.36").header("Accept-Language", "id-ID,id;q=0.9,en-US;q=0.8").build(); client.newCall(request).execute().use { response -> if (!response.isSuccessful) return@use; val html = response.body?.string().orEmpty(); val pattern = Regex("<a[^>]+href=[\\\"']([^\\\"']+)[\\\"'][^>]*>(.*?)</a>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)); for (match in pattern.findAll(html)) { val href = decodeHtml(match.groupValues[1].trim()); val title = match.groupValues[2].replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim(); if (title.isBlank() || !href.contains("/anime/", true) && !href.contains("/series/", true)) continue; val slug = normalizeAnimeSlug(URI(base).resolve(href).toString()); if (slug.isBlank()) continue; results.putIfAbsent(slug.lowercase(), ProviderAnime("$id:$slug", title, id)) } }; if (results.isNotEmpty()) break }; results.values.toList() }.getOrDefault(emptyList()) }
     private suspend fun requestJson(url: String): JSONObject? = withContext(Dispatchers.IO) { runCatching { Request.Builder().url(url).header("User-Agent", "KakaAnime/0.1").header("Accept", "application/json").build().let { request -> client.newCall(request).execute().use { response -> if (!response.isSuccessful) null else response.body?.string()?.takeIf { it.isNotBlank() }?.let(::JSONObject) } } }.getOrNull() }
     private fun JSONArray.toProviderAnimeList() = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val slug = normalizeAnimeSlug(item.optString("slug")); if (slug.isNotBlank()) add(ProviderAnime("$id:$slug", item.optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = item.optString("thumbnail").ifBlank { null }, status = item.optString("status").ifBlank { "UNKNOWN" }, rating = item.optString("score").toDoubleOrNull())) } }
     private fun JSONArray.toLegacyProviderAnimeList() = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val slug = normalizeAnimeSlug(item.optString("endpoint")); if (slug.isNotBlank()) add(ProviderAnime("$id:$slug", item.optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = item.optString("thumb").ifBlank { null }, status = item.optString("status").ifBlank { "UNKNOWN" }, rating = item.optString("rating").toDoubleOrNull())) } }
-    private fun JSONObject.toProviderAnime(slug: String) = ProviderAnime("$id:$slug", optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = optString("thumbnail").ifBlank { null }, description = optString("synopsis"), status = optJSONObject("metadata")?.optString("status").orEmpty().ifBlank { "UNKNOWN" })
+    private fun JSONObject.toProviderAnime(slug: String) = ProviderAnime("$id:$slug", optString("title").ifBlank { "Unknown Anime" }, id, providerId = id, posterUrl = optString("thumbnail").ifBlank { null }, description = optString("synopsis"), status = optJSONObject("metadata")?.optString("status").orEmpty().ifBlank { "UNKNOWN" })
+    private fun JSONObject.toCommunityAnime(slug: String) = ProviderAnime("$id:$slug", optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = optString("poster").ifBlank { null }, description = optString("synopsis"), status = optString("status").ifBlank { "UNKNOWN" })
     private fun JSONObject.toLegacyProviderAnime(slug: String): ProviderAnime { val detail = optJSONObject("anime_detail") ?: this; return ProviderAnime("$id:$slug", detail.optString("title").ifBlank { "Unknown Anime" }, id, posterUrl = detail.optString("thumb").ifBlank { null }, description = detail.optString("synopsis"), status = detail.optString("status").ifBlank { "UNKNOWN" }) }
+
+    private fun JSONArray.toCommunityProviderEpisodeList(slug: String) = buildList {
+        for (i in 0 until length()) {
+            val item = optJSONObject(i) ?: continue
+            val endpoint = item.optString("slug").trim('/')
+            val number = item.optInt("episode_number", -1).takeIf { it >= 0 }
+                ?: extractEpisodeNumber(item.optString("episode"), endpoint) ?: continue
+            if (endpoint.isBlank()) continue
+            add(ProviderEpisode("$id:community:$endpoint", "$id:$slug", number, id, item.optString("episode").ifBlank { "Episode $number" }))
+        }
+    }.sortedBy { it.number }
+
     private fun JSONArray.toProviderEpisodeList(slug: String) = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val endpoint = item.optString("slug").trim('/'); val number = item.optString("episode").toIntOrNull() ?: extractEpisodeNumber(item.optString("title"), endpoint) ?: continue; add(ProviderEpisode("$id:${endpoint.ifBlank { "$slug-episode-$number-sub-indo" }}", "$id:$slug", number, id, item.optString("title").ifBlank { "Episode $number" }, item.optString("thumbnail").ifBlank { null })) } }.sortedBy { it.number }
     private fun JSONArray.toLegacyProviderEpisodeList(slug: String) = buildList { for (i in 0 until length()) { val item = optJSONObject(i) ?: continue; val endpoint = item.optString("endpoint").trim('/'); val number = extractEpisodeNumber(item.optString("title"), endpoint) ?: continue; add(ProviderEpisode("$id:$endpoint", "$id:$slug", number, id, item.optString("title").ifBlank { "Episode $number" }, item.optString("thumbnail").ifBlank { null })) } }.sortedBy { it.number }
     private fun JSONObject.streamCandidates() = buildList { val streams = optJSONArray("streams") ?: JSONArray(); for (i in 0 until streams.length()) streams.optJSONObject(i)?.optString("embedUrl")?.trim()?.takeIf { it.isNotBlank() }?.let(::add); optString("defaultStreamUrl").trim().takeIf { it.isNotBlank() }?.let(::add) }.distinct()
