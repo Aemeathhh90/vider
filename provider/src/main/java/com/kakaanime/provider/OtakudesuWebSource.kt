@@ -81,7 +81,7 @@ internal class OtakudesuWebSource {
         document.select(".smokelister").forEach { heading ->
             val headingText = heading.text().lowercase()
             if (!headingText.contains("episode") || headingText.contains("batch")) return@forEach
-            heading.nextElementSibling?.select("li a[href]")?.forEach { dedicatedAnchors += it }
+            heading.nextElementSibling()?.select("li a[href]")?.forEach { dedicatedAnchors += it }
         }
 
         dedicatedAnchors.forEach { anchor ->
