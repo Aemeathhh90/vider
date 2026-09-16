@@ -1,5 +1,12 @@
 package com.kakaanime.provider
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
+
 class SmartProviderRouter(
     private val registry: ProviderRegistry,
     private val failureThreshold: Int = 2,
@@ -7,7 +14,8 @@ class SmartProviderRouter(
 ) {
     private enum class Operation { SEARCH, ANIME, EPISODES, STREAMS }
     private data class HealthState(var failures: Int = 0, var unavailableUntil: Long = 0L)
-    private val health = mutableMapOf<Pair<String, Operation>, HealthState>()
+    private data class RaceResult<T>(val provider: AnimeProvider, val value: T?)
+    private val health = ConcurrentHashMap<Pair<String, Operation>, HealthState>()
 
     suspend fun search(query: String): List<ProviderAnime> {
         if (query.isBlank()) return emptyList()
@@ -21,56 +29,101 @@ class SmartProviderRouter(
     }
 
     suspend fun getAnime(animeId: String): ProviderAnime? =
-        if (animeId.isBlank()) null else forEachProvider(Operation.ANIME) { it.getAnime(animeId)?.copy(providerId = it.id) }
+        if (animeId.isBlank()) null else raceProviders(Operation.ANIME) { provider ->
+            provider.getAnime(animeId)?.copy(providerId = provider.id)
+        }
 
     suspend fun getEpisodes(animeId: String): List<ProviderEpisode> =
-        if (animeId.isBlank()) emptyList() else forEachProvider(Operation.EPISODES) { provider ->
+        if (animeId.isBlank()) emptyList() else raceProviders(Operation.EPISODES) { provider ->
             provider.getEpisodes(animeId).takeIf { it.isNotEmpty() }
-                ?.map { it.copy(providerId = provider.id) }?.sortedBy { it.number }
-        } ?: emptyList()
+                ?.map { it.copy(providerId = provider.id) }
+                ?.sortedBy { it.number }
+        }.orEmpty()
 
     suspend fun getStreams(animeId: String, episodeNumber: Int): List<ProviderStream> {
         if (animeId.isBlank() || episodeNumber < 1) return emptyList()
-        return eligibleProviders(Operation.STREAMS).flatMap { provider ->
-            runCatching { provider.getStreams(animeId, episodeNumber) }
-                .onSuccess { markSuccess(provider.id, Operation.STREAMS) }
-                .onFailure { markFailure(provider.id, Operation.STREAMS) }
-                .getOrDefault(emptyList()).map { it.copy(providerId = provider.id) }
-        }.filter { it.url.isNotBlank() }
+        return raceProviders(Operation.STREAMS) { provider ->
+            provider.getStreams(animeId, episodeNumber)
+                .filter { it.url.isNotBlank() }
+                .takeIf { it.isNotEmpty() }
+                ?.map { it.copy(providerId = provider.id) }
+        }.orEmpty()
             .distinctBy { Triple(it.providerId, it.url, it.quality) }
-            .sortedWith(compareByDescending<ProviderStream> { qualityScore(it.quality) }
-                .thenBy { providerPriority(it.providerId) }.thenBy { it.providerId })
     }
 
-    private suspend fun <T> forEachProvider(operation: Operation, action: suspend (AnimeProvider) -> T?): T? {
-        for (provider in eligibleProviders(operation)) {
-            val result = runCatching { action(provider) }
-                .onSuccess { if (it != null) markSuccess(provider.id, operation) }
-                .onFailure { markFailure(provider.id, operation) }.getOrNull()
-            if (result != null) return result
+    /** First-success race: all eligible providers start together. */
+    private suspend fun <T> raceProviders(
+        operation: Operation,
+        action: suspend (AnimeProvider) -> T?
+    ): T? = coroutineScope {
+        val providers = eligibleProviders(operation)
+        if (providers.isEmpty()) return@coroutineScope null
+
+        val results = Channel<RaceResult<T>>(Channel.UNLIMITED)
+        val jobs = providers.map { provider ->
+            launch {
+                val result = try {
+                    action(provider)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    markFailure(provider.id, operation)
+                    null
+                }
+
+                if (result != null) {
+                    markSuccess(provider.id, operation)
+                    results.send(RaceResult(provider, result))
+                } else {
+                    results.send(RaceResult(provider, null))
+                }
+            }
         }
-        return null
+
+        var remaining = providers.size
+        var winner: T? = null
+        while (remaining > 0 && winner == null) {
+            val result = results.receive()
+            remaining--
+            if (result.value != null) {
+                winner = result.value
+                jobs.forEach(Job::cancel)
+            }
+        }
+
+        results.close()
+        winner
     }
 
-    private fun eligibleProviders(operation: Operation) = registry.all().filter { isEligible(it.id, operation) }
+    private fun eligibleProviders(operation: Operation) =
+        registry.all().filter { isEligible(it.id, operation) }
+
     private fun isEligible(id: String, op: Operation): Boolean {
-        val key = id to op; val state = health[key] ?: return true; val now = System.currentTimeMillis()
-        if (state.unavailableUntil <= now) { health.remove(key); return true }
+        val key = id to op
+        val state = health[key] ?: return true
+        val now = System.currentTimeMillis()
+        if (state.unavailableUntil <= now) {
+            health.remove(key, state)
+            return true
+        }
         return false
     }
-    private fun markSuccess(id: String, op: Operation) { health.remove(id to op) }
-    private fun markFailure(id: String, op: Operation) {
-        val state = health.getOrPut(id to op) { HealthState() }; state.failures++
-        if (state.failures >= failureThreshold) state.unavailableUntil = System.currentTimeMillis() + cooldownMs
+
+    private fun markSuccess(id: String, op: Operation) {
+        health.remove(id to op)
     }
-    private fun providerPriority(id: String) = registry.get(id)?.priority ?: Int.MAX_VALUE
+
+    private fun markFailure(id: String, op: Operation) {
+        val key = id to op
+        synchronized(health) {
+            val state = health[key] ?: HealthState().also { health[key] = it }
+            state.failures++
+            if (state.failures >= failureThreshold) {
+                state.unavailableUntil = System.currentTimeMillis() + cooldownMs
+            }
+        }
+    }
+
     private fun buildKey(title: String, year: Int?, season: Int?, seasonTitle: String?, group: String) =
         "${group.trim().lowercase().ifBlank { title.trim().lowercase() }}|${title.trim().lowercase().replace(Regex("\\s+"), " ")}|${year ?: 0}|${season ?: "na"}|${seasonTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()}"
-    private fun qualityScore(q: String?): Int = when {
-        q?.contains("1080", true) == true -> 1080
-        q?.contains("720", true) == true -> 720
-        q?.contains("480", true) == true -> 480
-        q?.contains("360", true) == true -> 360
-        else -> 0
-    }
 }
