@@ -64,12 +64,34 @@ internal class OtakudesuWebSource {
 
     private fun parseEpisodes(pageUrl: String, html: String): List<WebEpisode> {
         val result = linkedMapOf<Int, WebEpisode>()
+        val document = Jsoup.parse(html, pageUrl)
 
-        // Parse the real HTML DOM instead of depending on one exact anchor layout.
-        // Otakudesu has changed its theme/attribute ordering, while the episode
-        // anchors themselves remain normal <a href="..."> elements.
-        runCatching {
-            Jsoup.parse(html, pageUrl).select("a[href]").forEach { anchor ->
+        // Otakudesu exposes the episode list inside dedicated containers. Prefer
+        // those selectors so batch/recommendation/navigation links cannot be
+        // mistaken for episodes. These selectors are based on multiple working
+        // Otakudesu parsers, including the current .episodelist layout and the
+        // older .keyingpost layout.
+        val dedicatedAnchors = linkedSetOf<org.jsoup.nodes.Element>()
+        dedicatedAnchors += document.select(".episodelist ul li a[href]")
+        dedicatedAnchors += document.select(".episodelist li a[href]")
+        dedicatedAnchors += document.select(".keyingpost li a[href]")
+
+        // Some Otakudesu themes wrap the episode list after a heading such as
+        // "Episode List" rather than keeping the .episodelist class.
+        document.select(".smokelister").forEach { heading ->
+            val headingText = heading.text().lowercase()
+            if (!headingText.contains("episode") || headingText.contains("batch")) return@forEach
+            heading.nextElementSibling?.select("li a[href]")?.forEach { dedicatedAnchors += it }
+        }
+
+        dedicatedAnchors.forEach { anchor ->
+            addEpisode(result, pageUrl, anchor.attr("href"), anchor.text())
+        }
+
+        // Keep the broad DOM parser as a fallback for themes that do not expose
+        // one of the known episode containers.
+        if (result.isEmpty()) {
+            document.select("a[href]").forEach { anchor ->
                 addEpisode(result, pageUrl, anchor.attr("href"), anchor.text())
             }
         }
