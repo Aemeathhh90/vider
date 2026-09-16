@@ -7,6 +7,7 @@ object ProviderFactory {
         return ProviderRegistry().apply {
             register(OtakudesuProvider(browserResolver))
             register(SamehadakuProvider(browserResolver))
+            register(AnimeSailProvider(browserResolver))
 
             register(RemoteSourceProvider("animasu", "Animasu", 30, "animasu"))
             register(RemoteSourceProvider("animeindo", "AnimeIndo", 40, "animeindo"))
@@ -33,7 +34,6 @@ object ProviderFactory {
             register(RemoteSourceProvider("riie", "RiiE", 280, "riie"))
             register(RemoteSourceProvider("kusonime", "Kusonime", 290, "kusonime"))
             register(RemoteSourceProvider("animekuindo", "Animekuindo", 300, "animekuindo"))
-            register(RemoteSourceProvider("animesail", "AnimeSail", 310, "animesail"))
             register(RemoteSourceProvider("allanime", "AllAnime", 320, "allanime"))
         }
     }
